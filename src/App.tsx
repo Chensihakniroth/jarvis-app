@@ -4,6 +4,8 @@ import AuroraShaderBackground, { type BackgroundTheme } from './components/Auror
 import { useSoundEffects } from './hooks/useSoundEffects'
 import { Loader, type LoaderProps, type LoaderType, LOADER_TYPES } from './components/ui/loader'
 import { MatrixCodeRain } from './components/ui/matrix-code-rain'
+import { PanelLeftIcon, PanelRightIcon } from '@/lib/icons'
+import { ChatLayout } from './components/ChatLayout'
 
 // ── JARVIS Subtitle Filter ──────────────────────────────────────────────────
 // Strips markdown, emojis, bullet points, filler — same as the TTS filter
@@ -93,6 +95,14 @@ export default function App() {
     try { return localStorage.getItem('jarvis-section-bg') === 'true' } catch { return false }
   })
 
+  // Glass opacity (0-100, default 55)
+  const [glassOpacity, setGlassOpacity] = useState(() => {
+    try { return Number(localStorage.getItem('jarvis-glass-opacity')) || 55 } catch { return 55 }
+  })
+  const [glassSectionOpen, setGlassSectionOpen] = useState(() => {
+    try { return localStorage.getItem('jarvis-section-glass') === 'true' } catch { return false }
+  })
+
   // Code Rain settings (persisted)
   const [crCharset, setCrCharset] = useState(() => {
     try { return localStorage.getItem('jarvis-cr-charset') || 'Latin' } catch { return 'Latin' }
@@ -137,6 +147,17 @@ export default function App() {
   useEffect(() => { try { localStorage.setItem('jarvis-section-diag', String(diagSectionOpen)) } catch {} }, [diagSectionOpen])
   useEffect(() => { try { localStorage.setItem('jarvis-section-loader', String(loaderSectionOpen)) } catch {} }, [loaderSectionOpen])
   useEffect(() => { try { localStorage.setItem('jarvis-section-bg', String(bgSectionOpen)) } catch {} }, [bgSectionOpen])
+  useEffect(() => { try { localStorage.setItem('jarvis-section-glass', String(glassSectionOpen)) } catch {} }, [glassSectionOpen])
+  // Persist glass opacity + update CSS variable
+  useEffect(() => {
+    try { localStorage.setItem('jarvis-glass-opacity', String(glassOpacity)) } catch {}
+    document.documentElement.style.setProperty('--glass-opacity', String(glassOpacity / 100))
+  }, [glassOpacity])
+
+  // Initialize CSS variable on mount
+  useEffect(() => {
+    document.documentElement.style.setProperty('--glass-opacity', String(glassOpacity / 100))
+  }, [])
 
   // Persist Code Rain settings
   useEffect(() => { try { localStorage.setItem('jarvis-cr-charset', crCharset) } catch {} }, [crCharset])
@@ -166,6 +187,7 @@ export default function App() {
   const speakingRef = useRef(false)
   const textRef = useRef('')
   const charIndexRef = useRef(0)
+  const isStreamingRef = useRef(false)
   const wsRef = useRef<WebSocket | null>(null)
   const wsIdRef = useRef(0)
   const currentSessionIdRef = useRef('')
@@ -296,24 +318,29 @@ export default function App() {
             const sid = msg.params?.session_id || ''
             if (eventType) addLog(`Event: ${eventType} (sid: ${sid.slice(0,8)})`, 'info')
 
-            // Streaming text chunks — buffer but don't display yet (wait for audio sync)
+            // Streaming text chunks — display immediately, no TTS yet
             if (eventType === 'message.delta' && payload.text) {
               textRef.current += payload.text
               isStreamingRef.current = true
-              // Don't setResponseText here — wait for speak() to show text with audio
+              setResponseText(textRef.current)
             }
-            // Complete message
+            // Complete message — now start TTS with full text
             if (eventType === 'message.complete') {
               const content = payload.text || textRef.current
               if (content && typeof content === 'string') {
                 const filtered = jarvisFilter(content)
                 textRef.current = filtered
                 charIndexRef.current = filtered.length
+                setResponseText(filtered)
                 const assistantMsg: ChatMessage = { id: `a-${Date.now()}`, role: 'assistant', text: filtered, ts: Date.now() }
                 setChatMessages(prev => [...prev, assistantMsg])
               }
               setState('ready')
-              if (textRef.current) speak(textRef.current)
+              isStreamingRef.current = false
+              // Start TTS now with the complete text
+              if (textRef.current) {
+                speak(textRef.current)
+              }
             }
             if (eventType === 'status.update' && payload.text) {
               addLog(`Status: ${payload.text}`, 'info')
@@ -379,16 +406,19 @@ export default function App() {
     }
   }, [gatewayStatus, sessionToken, addLog, wsCall])
 
-  // Typewriter effect — only runs before streaming starts (not during deltas)
-  const isStreamingRef = useRef(false)
+  // Typewriter effect — only runs for non-streaming responses (simulated mode)
+  const typewriterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
-    if (!textRef.current || charIndexRef.current >= textRef.current.length) return
+    // Skip during streaming — text appears instantly from deltas
     if (isStreamingRef.current) return
-    const timer = setTimeout(() => {
+    if (!textRef.current || charIndexRef.current >= textRef.current.length) return
+    typewriterTimerRef.current = setTimeout(() => {
       charIndexRef.current += 1
       setResponseText(textRef.current.slice(0, charIndexRef.current))
     }, 15)
-    return () => clearTimeout(timer)
+    return () => {
+      if (typewriterTimerRef.current) clearTimeout(typewriterTimerRef.current)
+    }
   }, [responseText])
 
   // Split text into sentences for subtitle display
@@ -508,13 +538,17 @@ export default function App() {
   const handleSend = useCallback(async (text: string) => {
     sfx.click()
     if (!text.trim()) return
-    const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: 'user', text: text.trim(), ts: Date.now() }
-    setChatMessages(prev => [...prev, userMsg])
-    addLog(`User: "${text.slice(0, 80)}"`, 'info')
+
+    // Reset and stop any playing audio for new response
+    speakingRef.current = false
     textRef.current = ''
     charIndexRef.current = 0
     isStreamingRef.current = false
     setResponseText('')
+
+    const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: 'user', text: text.trim(), ts: Date.now() }
+    setChatMessages(prev => [...prev, userMsg])
+    addLog(`User: "${text.slice(0, 80)}"`, 'info')
     setState('thinking')
     try {
       if (wsConnectedRef.current) {
@@ -664,6 +698,11 @@ export default function App() {
     setBgSectionOpen(!bgSectionOpen)
   }
 
+  const toggleGlassSection = () => {
+    sfx.sectionToggle()
+    setGlassSectionOpen(!glassSectionOpen)
+  }
+
   const handleBgThemeChange = (t: BackgroundTheme) => {
     sfx.click()
     setBgTheme(t)
@@ -719,6 +758,9 @@ export default function App() {
       {/* ═══ Z-LAYER 1: Titlebar ═══ */}
       <div className="hud-titlebar" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
         <div className="hud-titlebar-left">
+          <button className="hud-titlebar-btn" onClick={toggleLeftSidebar} title="Toggle Sidebar" style={{ WebkitAppRegion: 'no-drag', marginRight: 4 } as React.CSSProperties}>
+            <PanelLeftIcon className="size-4 opacity-70" />
+          </button>
           <span className="hud-titlebar-dot" style={{ background: 'var(--col-energy-active)', boxShadow: '0 0 8px var(--col-energy-active)' }} />
           <span className="hud-titlebar-brand font-display">J.A.R.V.I.S.</span>
           <span className="hud-titlebar-sep" />
@@ -732,6 +774,9 @@ export default function App() {
           </span>
         </div>
         <div className="hud-titlebar-right" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+          <button className="hud-titlebar-btn" onClick={toggleRightSidebar} title="Toggle Right Sidebar" style={{ marginRight: 8 }}>
+            <PanelRightIcon className="size-4 opacity-70" />
+          </button>
           <button className="hud-titlebar-btn" onClick={() => window.jarvisAPI?.minimize()} title="Minimize">
             <svg width="12" height="12" viewBox="0 0 12 12"><line x1="1" y1="6" x2="11" y2="6" stroke="currentColor" strokeWidth="1.2"/></svg>
           </button>
@@ -869,107 +914,80 @@ export default function App() {
         </aside>
 
         {/* ─── CORE VIEWPORT ─── */}
-        <main className="hud-core">
-          {/* Orb + Status */}
-          <div className="hud-orb-area">
-            <div className={`hud-orb-container ${state === 'thinking' ? 'hud-orb-thinking' : state === 'speaking' ? 'hud-orb-speaking' : state === 'listening' ? 'hud-orb-listening' : state === 'error' ? 'hud-orb-error' : 'hud-orb-idle'}`}>
-              <ArcReactor state={state} size={200} />
-            </div>
-            <div className="hud-status-display">
-              <span className={`status-chip ${stateChipClass}`}>
-                <span className="pulse-dot" style={{
-                  width: 6, height: 6,
-                  background: stateChipClass === 'ready' ? 'var(--col-arc-primary)' : stateChipClass === 'speaking' ? 'var(--col-energy-active)' : stateChipClass === 'thinking' ? 'var(--col-energy-warn)' : 'var(--col-energy-alert)',
-                  color: stateChipClass === 'ready' ? 'var(--col-arc-primary)' : stateChipClass === 'speaking' ? 'var(--col-energy-active)' : stateChipClass === 'thinking' ? 'var(--col-energy-warn)' : 'var(--col-energy-alert)',
-                }} />
-                {stateLabel}
-              </span>
-            </div>
+        <main className={`hud-core ${chatMessages.length > 0 ? 'hud-core--chat-active' : ''}`}>
 
-            {/* Chat Stream */}
-            <div className="hud-chat-stream hud-brackets">
-              {chatMessages.length === 0 && !responseText && (
-                <div className="hud-chat-empty font-accent">
-                  <span style={{ color: 'var(--col-arc-primary)', fontSize: 24 }}>◎</span>
-                  <span style={{ color: 'var(--col-text-secondary)' }}>Ask J.A.R.V.I.S. anything</span>
+          {/* ── Hero Welcome (no messages) ── */}
+          {chatMessages.length === 0 && !responseText && (
+            <div className="hud-hero">
+              <div className={`hud-hero-reactor ${state === 'thinking' ? 'hud-orb-thinking' : state === 'speaking' ? 'hud-orb-speaking' : state === 'listening' ? 'hud-orb-listening' : state === 'error' ? 'hud-orb-error' : 'hud-orb-idle'}`}>
+                <ArcReactor state={state} size={280} />
+              </div>
+              <div className="hud-hero-status">
+                <span className={`status-chip ${stateChipClass}`}>
+                  <span className="pulse-dot" style={{
+                    width: 6, height: 6,
+                    background: stateChipClass === 'ready' ? 'var(--col-arc-primary)' : stateChipClass === 'speaking' ? 'var(--col-energy-active)' : stateChipClass === 'thinking' ? 'var(--col-energy-warn)' : 'var(--col-energy-alert)',
+                    color: stateChipClass === 'ready' ? 'var(--col-arc-primary)' : stateChipClass === 'speaking' ? 'var(--col-energy-active)' : stateChipClass === 'thinking' ? 'var(--col-energy-warn)' : 'var(--col-energy-alert)',
+                  }} />
+                  {stateLabel}
+                </span>
+              </div>
+              <div className="hud-hero-greeting font-display">
+                <span className="hud-hero-title">J.A.R.V.I.S.</span>
+                <span className="hud-hero-subtitle font-accent">Just A Rather Very Intelligent System</span>
+              </div>
+              {/* Voice bars in hero mode */}
+              {state === 'speaking' && (
+                <div className="hud-voice-bars">
+                  {[...Array(12)].map((_, i) => (
+                    <span key={i} style={{ animationDelay: `${i * 0.08}s` }} />
+                  ))}
                 </div>
               )}
-              {chatMessages.map(msg => (
-                <div key={msg.id} className={`hud-chat-msg ${msg.role === 'user' ? 'msg-user' : 'msg-ai'}`}>
-                  {msg.role === 'assistant' && (
-                    <span className="hud-chat-avatar" style={{ color: 'var(--col-arc-primary)' }}>◉</span>
-                  )}
-                  <div className={`hud-chat-bubble ${msg.role === 'user' ? 'hud-chat-bubble-user' : 'hud-chat-bubble-ai'}`}>
-                    {msg.text}
-                  </div>
-                </div>
-              ))}
-              {/* Typing indicator */}
-              {state === 'thinking' && (
-                <div className="hud-chat-msg msg-ai">
-                  <span className="hud-chat-avatar" style={{ color: 'var(--col-arc-primary)' }}>◉</span>
-                  <div className="hud-typing">
-                    <span className="typing-dot">·</span>
-                    <span className="typing-dot">·</span>
-                    <span className="typing-dot">·</span>
-                  </div>
+            </div>
+          )}
+
+          {/* ── Docked Reactor Header (has messages) ── */}
+          {(chatMessages.length > 0 || responseText) && (
+            <div className="hud-docked-header">
+              <div className={`hud-docked-reactor ${state === 'thinking' ? 'hud-orb-thinking' : state === 'speaking' ? 'hud-orb-speaking' : state === 'listening' ? 'hud-orb-listening' : state === 'error' ? 'hud-orb-error' : 'hud-orb-idle'}`}>
+                <ArcReactor state={state} size={48} />
+              </div>
+              <div className="hud-docked-info">
+                <span className="hud-docked-name font-display">J.A.R.V.I.S.</span>
+                <span className={`hud-docked-status status-chip-mini ${stateChipClass}`}>
+                  <span className="pulse-dot" style={{
+                    width: 5, height: 5,
+                    background: stateChipClass === 'ready' ? 'var(--col-arc-primary)' : stateChipClass === 'speaking' ? 'var(--col-energy-active)' : stateChipClass === 'thinking' ? 'var(--col-energy-warn)' : 'var(--col-energy-alert)',
+                    color: stateChipClass === 'ready' ? 'var(--col-arc-primary)' : stateChipClass === 'speaking' ? 'var(--col-energy-active)' : stateChipClass === 'thinking' ? 'var(--col-energy-warn)' : 'var(--col-energy-alert)',
+                  }} />
+                  {stateLabel}
+                </span>
+              </div>
+              <div className="hud-docked-meta font-mono">
+                <span style={{ color: 'var(--col-text-secondary)', fontSize: 10 }}>{chatMessages.length} messages</span>
+              </div>
+              {/* Voice bars inline */}
+              {state === 'speaking' && (
+                <div className="hud-voice-bars hud-voice-bars--inline">
+                  {[...Array(8)].map((_, i) => (
+                    <span key={i} style={{ animationDelay: `${i * 0.08}s` }} />
+                  ))}
                 </div>
               )}
-              <div ref={chatScrollRef} />
             </div>
+          )}
 
-            {/* Response display (typewriter — only when not in chat mode) */}
-            {responseText && chatMessages.length === 0 && (
-              <div className="hud-response">
-                <div className="hud-response-text font-body">
-                  {responseText}
-                  {charIndexRef.current < textRef.current.length && <span className="hud-cursor" />}
-                </div>
-              </div>
-            )}
-
-            {/* Voice bars */}
-            {state === 'speaking' && (
-              <div className="hud-voice-bars">
-                {[...Array(12)].map((_, i) => (
-                  <span key={i} style={{ animationDelay: `${i * 0.08}s` }} />
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Input Bar */}
-          <div className={`hud-input-bar ${listening ? 'hud-input-bar-listening' : ''}`}>
-            <div className="hud-input-inner">
-              <span className="hud-input-icon" style={{ color: 'var(--col-arc-primary)' }}>◎</span>
-              <textarea
-                id="hud-input"
-                placeholder="Ask J.A.R.V.I.S."
-                rows={1}
-                className="hud-input-textarea font-body"
-                style={{ color: 'var(--col-text-primary)' }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault()
-                    const el = e.target as HTMLTextAreaElement
-                    if (el.value.trim()) handleSend(el.value)
-                  }
-                }}
-              />
-              <div className="hud-input-actions">
-                <button className={`hud-btn-mic ${listening ? 'hud-btn-mic-active' : ''}`} onClick={handleMicToggle} title="Voice Input">
-                  🎙
-                </button>
-                <button className="hud-btn-send" title="Send" onClick={() => {
-                  const el = document.getElementById('hud-input') as HTMLTextAreaElement
-                  if (el?.value.trim()) handleSend(el.value)
-                }}>
-                  ➤
-                </button>
-              </div>
-            </div>
-            <div className="shimmer-line" />
-          </div>
+          {/* ── Chat Thread + Composer ── */}
+          {(chatMessages.length > 0 || responseText || true) && (
+            <ChatLayout
+              messages={chatMessages}
+              isThinking={state === 'thinking'}
+              onSend={handleSend}
+              onMicToggle={handleMicToggle}
+              isListening={listening}
+            />
+          )}
         </main>
 
         {/* ─── RIGHT SIDEBAR ─── */}
@@ -1042,6 +1060,44 @@ export default function App() {
               )}
             </div>
 
+            {/* GLASS Section — Chat overlay opacity */}
+            <div className="hud-panel-section">
+              <div className="panel-header" onClick={toggleGlassSection}>
+                <span className="panel-icon">◻</span>
+                <span style={{ flex: 1 }}>GLASS</span>
+                <span className="font-mono" style={{ fontSize: 9, color: 'var(--col-arc-primary)' }}>{glassOpacity}%</span>
+                <span className={`hud-chevron ${glassSectionOpen ? 'hud-chevron-open' : ''}`}>▾</span>
+              </div>
+              {glassSectionOpen && (
+                <div className="hud-panel-body">
+                  <div className="hud-cr-row">
+                    <label className="hud-cr-label-sm font-accent">Overlay Opacity: {glassOpacity}%</label>
+                    <input
+                      type="range" min={0} max={100} step={5}
+                      value={glassOpacity}
+                      onChange={e => setGlassOpacity(Number(e.target.value))}
+                      className="hud-cr-range"
+                    />
+                  </div>
+                  <div className="flex gap-2 mt-2">
+                    {[0, 25, 50, 75, 100].map(v => (
+                      <button
+                        key={v}
+                        onClick={() => setGlassOpacity(v)}
+                        style={{
+                          flex: 1, padding: '3px 0',
+                          background: glassOpacity === v ? 'var(--col-arc-primary)' : 'transparent',
+                          border: `1px solid ${glassOpacity === v ? 'var(--col-arc-primary)' : 'var(--col-border-dim)'}`,
+                          borderRadius: 4, color: glassOpacity === v ? 'var(--col-bg-void)' : 'var(--col-text-secondary)',
+                          fontSize: 9, fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s',
+                        }}
+                      >{v}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
             {/* CONTEXT Section — Arc Gauge */}
             <div className="hud-panel-section">
               <div className="panel-header" onClick={toggleContextSection}>
@@ -1106,7 +1162,7 @@ export default function App() {
               {loaderSectionOpen && (
                 <div className="hud-panel-body">
                   <div className="hud-loader-display">
-                    <Loader type={activeLoader} className="text-cyan size-16" />
+                    <Loader type={activeLoader} className="text-cyan size-10" pathSteps={120} />
                   </div>
                   <div className="hud-loader-list hud-scroll">
                     {LOADER_TYPES.map(variant => (

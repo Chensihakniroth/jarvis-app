@@ -345,10 +345,7 @@ export function Loader({
       pathRef.current?.setAttribute('d', buildPath(config, detailScale, pathSteps))
 
       particleRefs.current.forEach((node, index) => {
-        if (!node) {
-          return
-        }
-
+        if (!node) return
         const particle = particleFor(config, index, progress, detailScale, strokeScale)
         node.setAttribute('cx', particle.x.toFixed(2))
         node.setAttribute('cy', particle.y.toFixed(2))
@@ -361,8 +358,11 @@ export function Loader({
 
     render(performance.now())
 
-    return () => window.cancelAnimationFrame(animationFrame)
-  }, [config, pathSteps, strokeScale])
+    return () => {
+      window.cancelAnimationFrame(animationFrame)
+      particleRefs.current = []
+    }
+  }, [config.name, config.particleCount, config.durationMs, config.strokeWidth, config.trailSpan, config.rotate, config.rotationDurationMs, config.pulseDurationMs, pathSteps, strokeScale])
 
   return (
     <div
